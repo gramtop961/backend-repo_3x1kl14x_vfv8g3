@@ -38,6 +38,28 @@ class Product(BaseModel):
     category: str = Field(..., description="Product category")
     in_stock: bool = Field(True, description="Whether product is in stock")
 
+# F1 App Schemas
+
+class FavoriteDriver(BaseModel):
+    """
+    Favorite drivers saved by users
+    Collection name: "favoritedriver"
+    """
+    driver_id: str = Field(..., description="Ergast driverId, e.g., 'hamilton'")
+    code: Optional[str] = Field(None, description="Driver code, e.g., 'HAM'")
+    given_name: Optional[str] = Field(None, description="Given name")
+    family_name: Optional[str] = Field(None, description="Family name")
+    nationality: Optional[str] = Field(None, description="Driver nationality")
+
+class FavoriteConstructor(BaseModel):
+    """
+    Favorite constructors saved by users
+    Collection name: "favoriteconstructor"
+    """
+    constructor_id: str = Field(..., description="Ergast constructorId, e.g., 'mercedes'")
+    name: Optional[str] = Field(None, description="Constructor name")
+    nationality: Optional[str] = Field(None, description="Constructor nationality")
+
 # Add your own schemas here:
 # --------------------------------------------------
 

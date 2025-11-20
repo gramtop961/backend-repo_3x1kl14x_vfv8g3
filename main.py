@@ -1,8 +1,11 @@
 import os
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
+import requests
+from database import db, create_document, get_documents
 
-app = FastAPI()
+app = FastAPI(title="F1 API", description="Simple Formula 1 data API using Ergast + MongoDB for favorites")
 
 app.add_middleware(
     CORSMiddleware,
@@ -12,13 +15,23 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+ERGAST_BASE = "https://ergast.com/api/f1"
+
+class FavoriteDriverIn(BaseModel):
+    driver_id: str
+    code: str | None = None
+    given_name: str | None = None
+    family_name: str | None = None
+    nationality: str | None = None
+
+class FavoriteConstructorIn(BaseModel):
+    constructor_id: str
+    name: str | None = None
+    nationality: str | None = None
+
 @app.get("/")
 def read_root():
-    return {"message": "Hello from FastAPI Backend!"}
-
-@app.get("/api/hello")
-def hello():
-    return {"message": "Hello from the backend API!"}
+    return {"message": "F1 backend running"}
 
 @app.get("/test")
 def test_database():
@@ -31,39 +44,97 @@ def test_database():
         "connection_status": "Not Connected",
         "collections": []
     }
-    
     try:
-        # Try to import database module
-        from database import db
-        
         if db is not None:
             response["database"] = "✅ Available"
             response["database_url"] = "✅ Configured"
             response["database_name"] = db.name if hasattr(db, 'name') else "✅ Connected"
             response["connection_status"] = "Connected"
-            
-            # Try to list collections to verify connectivity
             try:
                 collections = db.list_collection_names()
-                response["collections"] = collections[:10]  # Show first 10 collections
+                response["collections"] = collections[:10]
                 response["database"] = "✅ Connected & Working"
             except Exception as e:
                 response["database"] = f"⚠️  Connected but Error: {str(e)[:50]}"
         else:
             response["database"] = "⚠️  Available but not initialized"
-            
-    except ImportError:
-        response["database"] = "❌ Database module not found (run enable-database first)"
     except Exception as e:
         response["database"] = f"❌ Error: {str(e)[:50]}"
-    
-    # Check environment variables
-    import os
+
     response["database_url"] = "✅ Set" if os.getenv("DATABASE_URL") else "❌ Not Set"
     response["database_name"] = "✅ Set" if os.getenv("DATABASE_NAME") else "❌ Not Set"
-    
     return response
 
+# External API helpers
+
+def fetch_ergast(endpoint: str, params: dict | None = None):
+    url = f"{ERGAST_BASE}/{endpoint}.json"
+    r = requests.get(url, params=params, timeout=15)
+    if r.status_code != 200:
+        raise HTTPException(status_code=502, detail=f"Upstream error {r.status_code}")
+    return r.json()
+
+# Public F1 data endpoints (read-only from Ergast)
+
+@app.get("/api/seasons")
+def list_seasons(limit: int = 80, offset: int = 0):
+    data = fetch_ergast("seasons", {"limit": limit, "offset": offset})
+    seasons = data.get("MRData", {}).get("SeasonTable", {}).get("Seasons", [])
+    return {"count": len(seasons), "items": seasons}
+
+@app.get("/api/{season}/drivers")
+def list_drivers(season: int):
+    data = fetch_ergast(f"{season}/drivers")
+    drivers = data.get("MRData", {}).get("DriverTable", {}).get("Drivers", [])
+    return {"season": season, "count": len(drivers), "items": drivers}
+
+@app.get("/api/{season}/constructors")
+def list_constructors(season: int):
+    data = fetch_ergast(f"{season}/constructors")
+    constructors = data.get("MRData", {}).get("ConstructorTable", {}).get("Constructors", [])
+    return {"season": season, "count": len(constructors), "items": constructors}
+
+@app.get("/api/{season}/races")
+def list_races(season: int):
+    data = fetch_ergast(f"{season}.json")
+    races = data.get("MRData", {}).get("RaceTable", {}).get("Races", [])
+    return {"season": season, "count": len(races), "items": races}
+
+@app.get("/api/{season}/{round}/results")
+def race_results(season: int, round: int):
+    data = fetch_ergast(f"{season}/{round}/results")
+    races = data.get("MRData", {}).get("RaceTable", {}).get("Races", [])
+    results = races[0]["Results"] if races else []
+    return {"season": season, "round": round, "count": len(results), "items": results}
+
+# Favorites using MongoDB for persistence
+
+@app.post("/api/favorites/drivers")
+def add_favorite_driver(payload: FavoriteDriverIn):
+    inserted_id = create_document("favoritedriver", payload)
+    return {"id": inserted_id}
+
+@app.get("/api/favorites/drivers")
+def get_favorite_drivers():
+    docs = get_documents("favoritedriver")
+    # Convert ObjectId to string if present
+    for d in docs:
+        if "_id" in d:
+            d["_id"] = str(d["_id"])
+    return {"count": len(docs), "items": docs}
+
+@app.post("/api/favorites/constructors")
+def add_favorite_constructor(payload: FavoriteConstructorIn):
+    inserted_id = create_document("favoriteconstructor", payload)
+    return {"id": inserted_id}
+
+@app.get("/api/favorites/constructors")
+def get_favorite_constructors():
+    docs = get_documents("favoriteconstructor")
+    for d in docs:
+        if "_id" in d:
+            d["_id"] = str(d["_id"])
+    return {"count": len(docs), "items": docs}
 
 if __name__ == "__main__":
     import uvicorn
