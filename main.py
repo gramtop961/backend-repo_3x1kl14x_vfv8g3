@@ -1,8 +1,10 @@
 import os
+from datetime import datetime
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import requests
+from requests.exceptions import RequestException
 from database import db, create_document, get_documents
 
 app = FastAPI(title="F1 API", description="Simple Formula 1 data API using Ergast + MongoDB for favorites")
@@ -69,43 +71,87 @@ def test_database():
 
 def fetch_ergast(endpoint: str, params: dict | None = None):
     url = f"{ERGAST_BASE}/{endpoint}.json"
-    r = requests.get(url, params=params, timeout=15)
-    if r.status_code != 200:
-        raise HTTPException(status_code=502, detail=f"Upstream error {r.status_code}")
-    return r.json()
+    try:
+        r = requests.get(url, params=params, timeout=15)
+        if r.status_code != 200:
+            raise HTTPException(status_code=502, detail=f"Upstream error {r.status_code}")
+        return r.json()
+    except RequestException as e:
+        # Surface a clear 503 so the frontend can show an offline state
+        raise HTTPException(status_code=503, detail="External data source unavailable: ergast.com") from e
+
+# Helper: offline fallback for seasons
+
+def offline_seasons(limit: int = 80, offset: int = 0):
+    current_year = datetime.utcnow().year
+    start_year = 1950
+    seasons_list = []
+    for y in range(start_year, current_year + 1):
+        seasons_list.append({
+            "season": str(y),
+            "url": f"https://en.wikipedia.org/wiki/{y}_Formula_One_World_Championship"
+        })
+    # Apply paging similar to Ergast
+    paged = seasons_list[offset: offset + limit]
+    return {"count": len(paged), "items": paged, "offline": True}
 
 # Public F1 data endpoints (read-only from Ergast)
 
 @app.get("/api/seasons")
 def list_seasons(limit: int = 80, offset: int = 0):
-    data = fetch_ergast("seasons", {"limit": limit, "offset": offset})
-    seasons = data.get("MRData", {}).get("SeasonTable", {}).get("Seasons", [])
-    return {"count": len(seasons), "items": seasons}
+    try:
+        data = fetch_ergast("seasons", {"limit": limit, "offset": offset})
+        seasons = data.get("MRData", {}).get("SeasonTable", {}).get("Seasons", [])
+        return {"count": len(seasons), "items": seasons}
+    except HTTPException as e:
+        if e.status_code == 503:
+            return offline_seasons(limit=limit, offset=offset)
+        raise
 
 @app.get("/api/{season}/drivers")
 def list_drivers(season: int):
-    data = fetch_ergast(f"{season}/drivers")
-    drivers = data.get("MRData", {}).get("DriverTable", {}).get("Drivers", [])
-    return {"season": season, "count": len(drivers), "items": drivers}
+    try:
+        data = fetch_ergast(f"{season}/drivers")
+        drivers = data.get("MRData", {}).get("DriverTable", {}).get("Drivers", [])
+        return {"season": season, "count": len(drivers), "items": drivers}
+    except HTTPException as e:
+        if e.status_code == 503:
+            return {"season": season, "count": 0, "items": [], "offline": True}
+        raise
 
 @app.get("/api/{season}/constructors")
 def list_constructors(season: int):
-    data = fetch_ergast(f"{season}/constructors")
-    constructors = data.get("MRData", {}).get("ConstructorTable", {}).get("Constructors", [])
-    return {"season": season, "count": len(constructors), "items": constructors}
+    try:
+        data = fetch_ergast(f"{season}/constructors")
+        constructors = data.get("MRData", {}).get("ConstructorTable", {}).get("Constructors", [])
+        return {"season": season, "count": len(constructors), "items": constructors}
+    except HTTPException as e:
+        if e.status_code == 503:
+            return {"season": season, "count": 0, "items": [], "offline": True}
+        raise
 
 @app.get("/api/{season}/races")
 def list_races(season: int):
-    data = fetch_ergast(f"{season}.json")
-    races = data.get("MRData", {}).get("RaceTable", {}).get("Races", [])
-    return {"season": season, "count": len(races), "items": races}
+    try:
+        data = fetch_ergast(f"{season}.json")
+        races = data.get("MRData", {}).get("RaceTable", {}).get("Races", [])
+        return {"season": season, "count": len(races), "items": races}
+    except HTTPException as e:
+        if e.status_code == 503:
+            return {"season": season, "count": 0, "items": [], "offline": True}
+        raise
 
 @app.get("/api/{season}/{round}/results")
 def race_results(season: int, round: int):
-    data = fetch_ergast(f"{season}/{round}/results")
-    races = data.get("MRData", {}).get("RaceTable", {}).get("Races", [])
-    results = races[0]["Results"] if races else []
-    return {"season": season, "round": round, "count": len(results), "items": results}
+    try:
+        data = fetch_ergast(f"{season}/{round}/results")
+        races = data.get("MRData", {}).get("RaceTable", {}).get("Races", [])
+        results = races[0]["Results"] if races else []
+        return {"season": season, "round": round, "count": len(results), "items": results}
+    except HTTPException as e:
+        if e.status_code == 503:
+            return {"season": season, "round": round, "count": 0, "items": [], "offline": True}
+        raise
 
 # Favorites using MongoDB for persistence
 
